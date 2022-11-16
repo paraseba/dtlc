@@ -7,7 +7,8 @@
   };
 
   outputs = { self, nixpkgs, flake-utils }:
-    flake-utils.lib.eachDefaultSystem (system:
+    #flake-utils.lib.eachDefaultSystem (system:
+    flake-utils.lib.eachSystem [ flake-utils.lib.system.x86_64-linux ] (system:
       let
         pkgs = nixpkgs.legacyPackages.${system};
 
@@ -26,8 +27,8 @@
 
         defaultPackage = self.packages.${system}.${packageName};
 
-        devShell = pkgs.mkShell {
-          buildInputs = with pkgs; [
+        devShells.default = pkgs.mkShell {
+          packages = with pkgs; [
             haskellPackages.haskell-language-server # you must build it with your ghc to work
             ghcid
             cabal-install

@@ -71,6 +71,7 @@ executable deplambda
     -- Other library packages from which modules are imported.
     build-depends:    base ^>=4.15.1.0
                     , mtl
+                    , text
                     , megaparsec
 
     -- Directories containing source files.
