@@ -10,16 +10,17 @@ import Control.Monad (unless)
 import Text.Megaparsec (runParser, ParseErrorBundle)
 import qualified Parser
 import Text.Pretty.Simple (pPrint)
-import Control.Monad.State (MonadState, get, modify, runStateT, runState, put, execStateT, evalStateT, state, liftIO, StateT)
+import Control.Monad.State (MonadState, get, modify, runState, put, evalStateT, liftIO, evalState, gets)
 import Data.Text (Text)
 import qualified Data.Text as Text
-import Data.Foldable (traverse_, Foldable (foldl'), toList)
+import Data.Foldable (traverse_, Foldable (foldl'), toList, fold)
 import Prelude hiding (exp)
 import qualified Data.List.NonEmpty as NE
 import Data.List (elemIndex)
 import Data.Void (Void)
 import Control.Lens hiding (Context)
-import Control.Monad.Reader (MonadReader, ask)
+import qualified Data.Text.IO as TIO
+import Data.Coerce (coerce)
 
 data TermUp =
     Bound Int
@@ -164,7 +165,7 @@ substUp i replacement (App fterm argterm) =
 
 
 data EvalResult =
-    EvAssumed
+    EvAssumed (NE.NonEmpty Parser.Identifier)
     | EvRes Value Type
     | EvError Text
 
@@ -174,7 +175,7 @@ data Expression =
 
 
 evaluateSt :: MonadState Context m => Parser.Statement -> m EvalResult
-evaluateSt (Parser.StAssume items) = traverse_ assume items $> EvAssumed
+evaluateSt (Parser.StAssume items) = traverse assume items <&> EvAssumed
 
 evaluateSt (Parser.StExpr expr) = do
     ctx <- get
@@ -194,12 +195,12 @@ evaluateSt (Parser.StExpr expr) = do
 
 
 
-assume :: MonadState Context m => Parser.AssumeItem -> m ()
+assume :: MonadState Context m => Parser.AssumeItem -> m Parser.Identifier
 assume  (Parser.TypeAssume n typ) =
-    modify ((id2id n, HasType $ type2type typ):)
+    modify ((id2id n, HasType $ type2type typ):) $> n
 
-assume  (Parser.KindAssume (Parser.Identifier name)) =
-    modify ((Global name, HasKind Star):)
+assume  (Parser.KindAssume n@(Parser.Identifier name)) =
+    modify ((Global name, HasKind Star):) $> n
 
 id2id :: Parser.Identifier -> Name
 id2id (Parser.Identifier name) = Global name
@@ -232,17 +233,6 @@ compileExpr bs (Parser.App f args) = do
 compileExpr bs (Parser.Lambda ids body) =
     compileLambda bs ids body
 
--- \ x y -> (\x -> x y) x
--- \x -> ( \y -> (\x -> x y) x)
-{-
-compileLambda :: Bindings -> NE.NonEmpty Parser.Identifier -> Parser.Expr -> CompilationResult Expression
-compileLambda bs ids (Parser.App f (arg NE.:| _)) = do -- we have single argument at this point
-      cf <- compileExpr newBindings f >>= toTermUp
-      carg <- toTermDown <$> compileExpr newBindings arg
-      pure . ExprUp $ App cf carg
-
-      where newBindings = reverse (toList ids) <> bs
-      -}
 
 compileLambda :: Bindings -> NE.NonEmpty Parser.Identifier -> Parser.Expr -> CompilationResult Expression
 compileLambda bs ids body =
@@ -269,24 +259,6 @@ toTermUp (ExprDown _) = throwError "Lambdas must be annotated with their type"
 toTermUp (ExprUp u) = pure u
 
 
-{-
-class Monad m => HasContext m where
-    getContext :: m Context
-
-class Monad m => HasInputs m where
-    getInput :: m (Maybe Text)
--}
-
-replEval :: (MonadState Context m) => Text -> (EvalResult -> m ()) -> (ParseErrorBundle Text Void -> m ()) -> m ()
-replEval input showResult showParseError =
-    case runParser Parser.statementParser "input" input of
-        Left err -> showParseError err
-        Right statement -> do
-            ctx <- get
-            let (res, newCtx) = runState (evaluateSt statement) ctx
-            put newCtx
-            showResult res
-
 repl :: MonadState ([Text], Context) m => (EvalResult -> m ()) -> (ParseErrorBundle Text Void -> m ()) -> m ()
 repl showResult showParseError =  do
     ss <- use _1
@@ -306,33 +278,60 @@ repl showResult showParseError =  do
 basicRepl :: NE.NonEmpty Text -> IO ()
 basicRepl inputs = void $ evalStateT (repl (liftIO . printEvalRes) (liftIO . print)) (toList inputs, [])
 
-    {-
-    case uncons ss of
-        Just (s, more) -> (Just s, more)
-        Nothing -> undefined -- (Nothing, [])
+type NamePool = [Text]
 
-printReplSession :: NE.NonEmpty Text -> IO ()
-printReplSession statements = evalStateT go (toList statements, [])
+displayDown :: MonadState NamePool m => NamePool -> TermDown -> m Text
+displayDown binding (Inf t) = displayUp binding t
+displayDown binding (Lambda d) = do
+    var <- gets head
+    modify tail -- reserve the name
+    body <- displayDown (var:binding) d
+    modify (var:)  -- return the name to the pool
+    pure $ wrap var body
     where
-        go :: StateT ([Text], Context) IO ()
-        go = undefined -- zoom _2 $ repl showResult showParseError
+        wrap var body = "λ" <> var <> " → " <> body
 
-        getInput :: StateT ([Text]) IO (Maybe Text)
-        getInput = undefined {- do
-           ss <- view id
-           case uncons ss of
-              Just (s, more) -> (Just s, more)
-              Nothing -> (Nothing, [])
-              -}
-        showResult = liftIO . printEvalRes
-        showParseError = liftIO . print
-    
-        -}
+displayUp :: MonadState NamePool m => NamePool -> TermUp -> m Text
+displayUp binding (Bound n) = pure (binding !! n)
+displayUp _ (Free name) = pure $ displayName name
+displayUp binding (Ann term typ) =
+    displayDown binding term <&> (<> " :: " <> displayType typ)
+
+
+displayUp binding (App f arg) = wrap <$> displayUp binding f <*> displayDown binding arg
+    where
+        wrap f' arg' = "(" <> f'  <> " " <> arg' <> ")"
+
+displayType :: Type -> Text
+displayType (TFree n) = displayName n
+displayType (TFun from to) = "(" <> displayType from <> " → " <> displayType to <> ")"
+
+
+displayName :: Name -> Text
+displayName (Global t) = t
+displayName (Local n) = error "local display"
+displayName (Quote n) = error "quote display"
+
+
+
+display :: TermDown -> Text
+display term = evalState (displayDown [] term) nameSource
+
+nameSource :: NamePool
+nameSource = usual ++ (("a" <>) .  Text.pack . show <$> [(1 :: Int)..])
+    where usual = ["x", "y", "z", "u", "v", "w", "r", "s", "t"]
+  
+
 
 printEvalRes :: EvalResult -> IO ()
-printEvalRes EvAssumed = putStrLn "Assumed OK"
+printEvalRes (EvAssumed ids) = TIO.putStrLn $ "Assumed: " <> names
+    where names = fold $ NE.intersperse ", " (identifier2text <$> ids)
 printEvalRes (EvError err) = putStrLn $ "Error: " <> show err
-printEvalRes (EvRes val typ) = putStrLn $ show (quote val) <> " :: " <> show typ
+printEvalRes (EvRes val typ) =
+    TIO.putStrLn $ display (quote val) <> " :: " <> displayType typ
+
+identifier2text :: Parser.Identifier -> Text
+identifier2text = coerce
 
 -- samples
 id' :: TermDown
@@ -369,15 +368,6 @@ ctx2 = (Global "b", HasKind Star) : ctx1
 
 test :: IO ()
 test = do
-
-     {-
-    print $ quote $ evalDown id' []
-    print $ quote $ evalDown const' []
-    print $ quote $ evalUp term1 []
-    print $ quote $ evalUp term2 []
-    print $ typeUp 0 ctx1 term1
-    print $ typeUp 0 ctx2 term2
-    -}
 
     let parse = runParser Parser.assumeParser "input"
         parseType = runParser Parser.typeParser "input"
@@ -458,3 +448,16 @@ test = do
         , "((λx y → x) :: (β → β) → α → β → β) (λx → x) y"
         ]
 
+    putStrLn "///////////////////////////"
+    basicRepl
+        [ "assume (α :: *) (y :: α)"
+        , "((λx → x) :: α → α) y"
+        , "assume (β :: *) "
+        , "((λx y → x) :: (β → β) → α → β → β) "
+        ]
+
+    putStrLn "///////////////////////////"
+    basicRepl
+        [ "assume (β :: *) (f :: β -> β) (b :: β)"
+        , "((\\x -> x ) :: β -> β) (f b)"
+        ]
