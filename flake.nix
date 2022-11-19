@@ -1,39 +1,54 @@
 {
-  description = "Dependent lambda calculus";
-
-  inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs";
-    flake-utils.url = "github:numtide/flake-utils";
-  };
-
-  outputs = { self, nixpkgs, flake-utils }:
-    #flake-utils.lib.eachDefaultSystem (system:
-    flake-utils.lib.eachSystem [ flake-utils.lib.system.x86_64-linux ] (system:
+  inputs.haskellNix.url = "github:input-output-hk/haskell.nix";
+  inputs.nixpkgs.follows = "haskellNix/nixpkgs-unstable";
+  inputs.flake-utils.url = "github:numtide/flake-utils";
+  outputs = { self, nixpkgs, flake-utils, haskellNix }:
+    let
+      supportedSystems = [
+        "x86_64-linux"
+        "x86_64-darwin"
+        "aarch64-linux"
+        "aarch64-darwin"
+      ];
+    in
+      flake-utils.lib.eachSystem supportedSystems (system:
       let
-        pkgs = nixpkgs.legacyPackages.${system};
-
-        # haskellPackages = pkgs.haskell.packages.ghc925;
-        haskellPackages = pkgs.haskellPackages;
-
-        jailbreakUnbreak = pkg:
-          pkgs.haskell.lib.doJailbreak (pkg.overrideAttrs (_: { meta = { }; }));
-
-        packageName = "deplambdba";
-      in {
-        packages.${packageName} =
-          haskellPackages.callCabal2nix packageName self rec {
-            # Dependency overrides go here
-          };
-
-        defaultPackage = self.packages.${system}.${packageName};
-
-        devShells.default = pkgs.mkShell {
-          packages = with pkgs; [
-            haskellPackages.haskell-language-server # you must build it with your ghc to work
-            ghcid
-            cabal-install
-          ];
-          inputsFrom = builtins.attrValues self.packages.${system};
-        };
+        overlays = [ haskellNix.overlay
+          (final: prev: {
+            depLambdaProject =
+              final.haskell-nix.project' {
+                src = ./.;
+                compiler-nix-name = "ghc902";
+                evalSystem = "x86_64-linux";
+                # This is used by `nix develop .` to open a shell for use with
+                # `cabal`, `hlint` and `haskell-language-server`
+                shell.tools = {
+                  cabal = {};
+                  hlint = {};
+                  haskell-language-server = "1.7.0.0";
+                };
+                shell.withHoogle = false;
+                ## Non-Haskell shell tools go here
+                #shellFor.packages = with pkgs; [
+                #  nixpkgs-fmt
+                #];
+                };
+          })
+        ];
+        pkgs = import nixpkgs { inherit system overlays; inherit (haskellNix) config; };
+        flake = pkgs.depLambdaProject.flake {};
+      in flake // {
+        legacyPackages = pkgs;
+        packages.default = flake.packages."deplambda:exe:deplambda";
       });
+
+  # --- Flake Local Nix Configuration ----------------------------
+  #nixConfig = {
+  #  # This sets the flake to use the IOG nix cache.
+  #  # Nix should ask for permission before using it,
+  #  # but remove it here if you do not want it to.
+  #  extra-substituters = ["https://cache.iog.io"];
+  #  extra-trusted-public-keys = ["hydra.iohk.io:f/Ea+s+dFdN+3Y/G+FDgSq+a5NEWhJGzdjvKNGv0/EQ="];
+  #  allow-import-from-derivation = "true";
+  #};
 }

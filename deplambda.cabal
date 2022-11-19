@@ -69,10 +69,13 @@ executable deplambda
     -- other-extensions:
 
     -- Other library packages from which modules are imported.
-    build-depends:    base ^>=4.15.1.0
+    build-depends:    base
                     , mtl
                     , text
                     , megaparsec
+                    , parser-combinators
+                    , pretty-simple
+                    , lens
 
     -- Directories containing source files.
     hs-source-dirs:   app
