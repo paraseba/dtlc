@@ -4,4 +4,4 @@ import qualified Lambda
 
 main :: IO ()
 main = do
-    Lambda.test
+    Lambda.ioRepl

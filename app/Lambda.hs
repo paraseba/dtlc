@@ -21,6 +21,10 @@ import Data.Void (Void)
 import Control.Lens hiding (Context)
 import qualified Data.Text.IO as TIO
 import Data.Coerce (coerce)
+import qualified Streamly.Prelude as Stream
+import qualified Streamly.Console.Stdio as Stdio
+import qualified Streamly.Data.Unicode.Stream as UniStream
+import qualified Streamly.Data.Fold as Fold
 
 data TermUp =
     Bound Int
@@ -259,24 +263,33 @@ toTermUp (ExprDown _) = throwError "Lambdas must be annotated with their type"
 toTermUp (ExprUp u) = pure u
 
 
-repl :: MonadState ([Text], Context) m => (EvalResult -> m ()) -> (ParseErrorBundle Text Void -> m ()) -> m ()
-repl showResult showParseError =  do
-    ss <- use _1
-    case uncons ss of
-        Nothing -> pure ()
-        Just (statement, more) -> do
-            _1 .= more
-            case runParser Parser.statementParser "input" statement of
-                Left err -> showParseError err
-                Right parsed -> do
-                    context <- use _2
-                    let (res, newContext) = runState (evaluateSt parsed) context
-                    _2 .= newContext
-                    showResult res
-            repl showResult showParseError
+repl :: MonadState Context m => (EvalResult -> m ()) -> (ParseErrorBundle Text Void -> m ()) -> Text -> m ()
+repl showResult showParseError statement =  do
+    case runParser Parser.statementParser "input" statement of
+        Left err -> showParseError err
+        Right parsed -> do
+            res <- evaluateSt parsed
+            showResult res
+
+emptyContext :: Context
+emptyContext = []
 
 basicRepl :: NE.NonEmpty Text -> IO ()
-basicRepl inputs = void $ evalStateT (repl (liftIO . printEvalRes) (liftIO . print)) (toList inputs, [])
+basicRepl inputs = 
+    Stream.fromFoldable inputs
+        & Stream.mapM (repl (liftIO . printEvalRes) (liftIO . print))
+        & Stream.drain
+        & flip evalStateT emptyContext
+
+ioRepl :: IO ()
+ioRepl =
+    Stream.unfold Stdio.read ()
+        & UniStream.decodeUtf8
+        & Stream.splitOnSuffix (== '\n') (Fold.foldl' Text.snoc "")
+        & Stream.mapM (repl (liftIO . printEvalRes) (liftIO . print))
+        & Stream.drain
+        & flip evalStateT emptyContext
+
 
 type NamePool = [Text]
 

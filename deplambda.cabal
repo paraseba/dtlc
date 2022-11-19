@@ -76,6 +76,7 @@ executable deplambda
                     , parser-combinators
                     , pretty-simple
                     , lens
+                    , streamly
 
     -- Directories containing source files.
     hs-source-dirs:   app

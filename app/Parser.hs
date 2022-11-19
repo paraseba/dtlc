@@ -12,6 +12,7 @@ import qualified Data.Text as T
 import Data.Functor (void)
 import Data.String (IsString)
 import qualified Data.List.NonEmpty as NE
+import qualified Streamly.Prelude as Stream
 
 foo :: Int
 foo = 1
