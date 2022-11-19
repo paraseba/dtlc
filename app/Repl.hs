@@ -26,7 +26,7 @@ repl showResult showParseError statement =  do
     case runParser Parser.statementParser "input" statement of
         Left err -> showParseError err
         Right parsed -> do
-            res <- evaluateSt parsed
+            res <- evaluateStatement parsed
             showResult res
 
 emptyContext :: Context
@@ -57,7 +57,8 @@ printEvalRes (EvAssumed ids) = TIO.putStrLn $ "Assumed: " <> names
     where names = fold $ NE.intersperse ", " (identifier2text <$> ids)
 printEvalRes (EvError err) = putStrLn $ "Error: " <> show err
 printEvalRes (EvRes val typ) =
-    TIO.putStrLn $ display (quote val) <> " :: " <> displayType typ
+    TIO.putStrLn $ showValue val <> " :: " <> typeText
+    where typeText = maybe "?" showType typ
 
 
 identifier2text :: Parser.Identifier -> Text
@@ -95,4 +96,10 @@ test = do
     basicRepl
         [ "assume (β :: *) (f :: β -> β) (b :: β)"
         , "((\\x -> x ) :: β -> β) (f b)"
+        ]
+
+    putStrLn "///////////////////////////"
+    basicRepl
+        [ "assume (t1 :: *) (t2 :: *) (a :: t1)"
+        , "a :: t2"
         ]

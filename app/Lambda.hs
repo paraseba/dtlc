@@ -2,7 +2,14 @@
 {-# LANGUAGE OverloadedLists #-}
 {-# LANGUAGE FlexibleContexts #-}
 
-module Lambda where
+module Lambda (
+    Context
+    , EvalResult(..)
+    , evaluateStatement
+    , showValue
+    , showType
+    , test -- fixme delete
+) where 
 
 import Control.Monad.Except (throwError)
 import Data.Functor (($>))
@@ -53,33 +60,35 @@ data Type =
 
 type Env = [Value]
 
-evalUp :: TermUp -> Env -> Value
-evalUp (Bound n) env = env !! n
-evalUp (Free name) _ = VNeutral $ NFree name
-evalUp (Ann t _) env = evalDown t env
-evalUp (App fterm arg) env =
-     case evalUp fterm env of
-         VFun fvalue -> fvalue argEval
-         VNeutral n -> VNeutral (NApp n argEval)
-    where argEval = evalDown arg env
+evalUp :: Env -> TermUp -> Value
+evalUp env (Bound n) = env !! n
+evalUp _ (Free name) = VNeutral $ NFree name
+evalUp env (Ann t _) = evalDown env t
+evalUp env (App fterm arg) =
+    case evalUp env fterm of
+        VFun fvalue -> fvalue argEval
+        VNeutral n -> VNeutral (NApp n argEval)
+    where argEval = evalDown env arg
 
 
-evalDown :: TermDown -> Env -> Value
-evalDown (Lambda t) env =
-    VFun $ \v -> evalDown t (v : env)
+evalDown :: Env -> TermDown  -> Value
+evalDown env (Lambda t) =
+    VFun (\arg -> evalDown (arg:env) t)
 
-evalDown (Inf t) env = evalUp t env
+evalDown env (Inf t) = evalUp env t
 
 quote :: Value -> TermDown
 quote = quote' 0
 
 quote' :: Int -> Value -> TermDown
 quote' i (VNeutral n) = Inf $ quoteNeutral i n
-quote' i (VFun f) = Lambda $ quote' (i+1) $ f (VNeutral (NFree (Quote i)))
+quote' i (VFun f) =
+    Lambda $ quote' (i+1) $ f (VNeutral (NFree (Quote i)))
 
 quoteNeutral :: Int -> Neutral -> TermUp
 quoteNeutral i (NFree n) = replaceQuote i n
-quoteNeutral i (NApp f arg) = App (quoteNeutral (i+1) f) (quote' (i+1) arg)
+quoteNeutral i (NApp f arg) =
+    App (quoteNeutral (i+1) f) (quote' (i+1) arg)
 
 replaceQuote :: Int -> Name -> TermUp
 replaceQuote i (Quote n) = Bound (i - n - 1)
@@ -93,49 +102,56 @@ data TypeInfo =
     | HasKind Kind
     deriving (Show, Eq)
 
-type Result a = Either Text a
+type TypingResult a = Either Text a
 type Context = [(Name, TypeInfo)]
 
 
-isStar :: Context -> Type -> Result ()
+isStar :: Context -> Type -> TypingResult ()
 isStar ctx (TFree n) =
     unless (lookup n ctx == Just (HasKind Star))
         (throwError $ "Not * Kind: " <> Text.pack (show n))
 
 isStar ctx (TFun from to) = isStar ctx from *> isStar ctx to
 
-typeUp :: Int -> Context -> TermUp -> Result Type
-typeUp _ _ (Bound _) = throwError "This should never be called"
+typeUp :: Context -> TermUp -> TypingResult Type
+typeUp = typeUp' 0
 
-typeUp _ ctx (Free name) =
+typeUp' :: Int -> Context -> TermUp -> TypingResult Type
+typeUp' _ _ (Bound _) = throwError "This should never be called"
+
+typeUp' _ ctx (Free name) =
     case lookup name ctx of
         Just (HasType typ)  -> pure typ
         _ -> throwError $ "Name not found " <> Text.pack (show name)
 
-typeUp i ctx (Ann term typ) = do
-    isStar ctx typ
-    typeDown i ctx term typ
-    pure typ
+typeUp' i ctx (Ann term typ) =
+    isStar ctx typ >> typeDown i ctx term typ $> typ
 
-typeUp i ctx (App fterm arg) = do
-    ftype <- typeUp i ctx fterm
+typeUp' i ctx (App fterm arg) = do
+    ftype <- typeUp' i ctx fterm
     case ftype of
         TFun fromType toType -> typeDown i ctx arg fromType $> toType
         _ -> throwError "Invalid application"
 
 
-typeDown :: Int -> Context -> TermDown -> Type -> Result ()
-typeDown i ctx (Lambda t) (TFun from to)  = typeDown
-    (i + 1)
-    ((Local i, HasType from) : ctx)
-    (substDown 0 (Free (Local i)) t)
-    to
+typeDown :: Int -> Context -> TermDown -> Type -> TypingResult ()
+typeDown i ctx (Lambda t) (TFun from to)  =
+    typeDown (i + 1)
+             ((Local i, HasType from) : ctx)
+             (substDown 0 (Free (Local i)) t)
+             to
 
-typeDown _ _tx (Lambda _) _  = throwError "Cannot type lambda"
+typeDown _ _ (Lambda _) _  = throwError "Cannot type lambda"
 
 typeDown i ctx (Inf t) typ = do
-    actual <- typeUp i ctx t
-    unless (actual == typ) (throwError "Invalid type")
+    actual <- typeUp' i ctx t
+    unless (actual == typ) $
+        throwError $
+            "Invalid type: expected ("
+            <> showType typ
+            <> ") but got ("
+            <> showType actual
+            <> ")"
 
 substDown :: Int -> TermUp -> TermDown -> TermDown
 substDown i replacement (Lambda t) =
@@ -162,32 +178,34 @@ substUp i replacement (App fterm argterm) =
 
 data EvalResult =
     EvAssumed (NE.NonEmpty Parser.Identifier)
-    | EvRes Value Type
+    | EvRes Value (Maybe Type)
     | EvError Text
 
 data Expression =
-    ExprUp TermUp | ExprDown TermDown
+    ExprUp TermUp
+    | ExprDown TermDown
     deriving Show
 
+emptyEnv :: Env
+emptyEnv = []
 
-evaluateSt :: MonadState Context m => Parser.Statement -> m EvalResult
-evaluateSt (Parser.StAssume items) = traverse assume items <&> EvAssumed
+evaluateStatement :: MonadState Context m => Parser.Statement -> m EvalResult
+evaluateStatement (Parser.StAssume items) = traverse assume items <&> EvAssumed
 
-evaluateSt (Parser.StExpr expr) = do
-    ctx <- get
+evaluateStatement (Parser.StExpr expr) = do
     case compileExpr expr of
         Left err -> pure $ EvError err
-        Right compiledExpr ->
-            case compiledExpr of
-                ExprUp e ->
-                    case typeUp 0 ctx e of
-                        Left err -> pure $ EvError err
-                        Right typ -> do
-                            let val = evalUp e []
-                            pure $ EvRes val typ
-                ExprDown e -> do
-                    let val = evalDown e []
-                    pure $ EvRes val (TFree (Global "unknown"))
+        Right compiledExpr -> evalExpression compiledExpr
+
+evalExpression :: MonadState Context m => Expression -> m EvalResult
+evalExpression (ExprUp e) = do
+    ctx <- get
+    case typeUp ctx e of
+        Left err -> pure $ EvError err
+        Right typ -> pure $ EvRes (evalUp emptyEnv e) (Just typ)
+
+evalExpression (ExprDown e) =
+    pure $ EvRes (evalDown emptyEnv e) Nothing 
 
 
 
@@ -214,14 +232,15 @@ compileExpr = compileExpr' []
 compileExpr' :: Bindings -> Parser.Expr -> CompilationResult Expression
 compileExpr' bs (Parser.Var n) =
     pure . ExprUp $ replacement
-    where replacement =
+    where
+        replacement =
             case elemIndex n bs of
                 Nothing -> Free $ id2id n
                 Just i -> Bound i
 
-compileExpr' bs (Parser.Ann exp typ) = do
-    term <- compileExpr' bs exp
-    pure $ ExprUp (Ann (toTermDown term) (type2type typ))
+compileExpr' bs (Parser.Ann exp typ) =
+    compileExpr' bs exp <&> \term ->
+        ExprUp (Ann (toTermDown term) (type2type typ))
 
 compileExpr' bs (Parser.App f args) = do
   argTerms <- traverse (fmap toTermDown . compileExpr' bs) args
@@ -238,7 +257,6 @@ compileLambda bs ids body =
     wrap <$> compileExpr' newBindings body
     where
         newBindings = reverse (toList ids) <> bs
-
         wrap exp = iterate (ExprDown . Lambda . toTermDown) exp !! length ids
 
 
@@ -252,34 +270,33 @@ toTermUp (ExprDown _) = throwError "Lambdas must be annotated with their type"
 toTermUp (ExprUp u) = pure u
 
 
-
 type NamePool = [Text]
 
-displayDown :: MonadState NamePool m => NamePool -> TermDown -> m Text
-displayDown binding (Inf t) = displayUp binding t
-displayDown binding (Lambda d) = do
+showDown :: MonadState NamePool m => NamePool -> TermDown -> m Text
+showDown binding (Inf t) = showUp binding t
+showDown binding (Lambda d) = do
     var <- gets head
     modify tail -- reserve the name
-    body <- displayDown (var:binding) d
+    body <- showDown (var:binding) d
     modify (var:)  -- return the name to the pool
     pure $ wrap var body
     where
         wrap var body = "λ" <> var <> " → " <> body
 
-displayUp :: MonadState NamePool m => NamePool -> TermUp -> m Text
-displayUp binding (Bound n) = pure (binding !! n)
-displayUp _ (Free name) = pure $ displayName name
-displayUp binding (Ann term typ) =
-    displayDown binding term <&> (<> " :: " <> displayType typ)
+showUp :: MonadState NamePool m => NamePool -> TermUp -> m Text
+showUp binding (Bound n) = pure (binding !! n)
+showUp _ (Free name) = pure $ displayName name
+showUp binding (Ann term typ) =
+    showDown binding term <&> (<> " :: " <> showType typ)
 
 
-displayUp binding (App f arg) = wrap <$> displayUp binding f <*> displayDown binding arg
+showUp binding (App f arg) = wrap <$> showUp binding f <*> showDown binding arg
     where
         wrap f' arg' = "(" <> f'  <> " " <> arg' <> ")"
 
-displayType :: Type -> Text
-displayType (TFree n) = displayName n
-displayType (TFun from to) = "(" <> displayType from <> " → " <> displayType to <> ")"
+showType :: Type -> Text
+showType (TFree n) = displayName n
+showType (TFun from to) = "(" <> showType from <> " → " <> showType to <> ")"
 
 
 displayName :: Name -> Text
@@ -288,14 +305,15 @@ displayName (Local _) = error "local display"
 displayName (Quote _) = error "quote display"
 
 
-display :: TermDown -> Text
-display term = evalState (displayDown [] term) nameSource
+showValue :: Value -> Text
+showValue term = evalState (showDown [] (quote term)) nameSource
 
 nameSource :: NamePool
 nameSource = usual ++ (("a" <>) .  Text.pack . show <$> [(1 :: Int)..])
     where usual = ["x", "y", "z", "u", "v", "w", "r", "s", "t"]
   
 
+{-
 -- samples
 id' :: TermDown
 id' = Lambda (Inf (Bound 0))
@@ -328,6 +346,7 @@ ctx1 = [(Global "y", HasType (tfree "a")), (Global "a", HasKind Star)]
 
 ctx2 :: Context
 ctx2 = (Global "b", HasKind Star) : ctx1
+-}
 
 test :: IO ()
 test = do
@@ -379,8 +398,6 @@ test = do
     pPrint $ parseStatement "   ((\\x y -> x) :: (bar -> baz -> bar)) (a b) (c :: ctype)   \n "
     pPrint $ parseStatement "   assume (ccc ::  *) (ddd ::  sometype)(eee ::  *) \n"
 
-    --- fixme space before input
-
     pPrint $ compileExpr  (Parser.Var "x")
     pPrint $ compileExpr (Parser.Ann (Parser.Var "x") (Parser.TId "foo") )
     pPrint $ compileExpr (Parser.Lambda ["x"] (Parser.Var "x")  )
@@ -389,5 +406,6 @@ test = do
     pPrint $ compileExpr (Parser.Lambda ["x", "y"] (Parser.Var "y")  )
     pPrint $ compileExpr (Parser.Lambda ["x", "y"] (Parser.Lambda ["x"] (Parser.Var "x"))  )
     pPrint $ compileExpr (Parser.App (Parser.Lambda ["x", "y"] (Parser.Lambda ["x"] (Parser.Var "x"))  ) [Parser.Var "x", Parser.Var "y"] )
+
 
 
