@@ -7,24 +7,17 @@ module Lambda where
 import Control.Monad.Except (throwError)
 import Data.Functor (($>))
 import Control.Monad (unless)
-import Text.Megaparsec (runParser, ParseErrorBundle)
+import Text.Megaparsec (runParser)
 import qualified Parser
 import Text.Pretty.Simple (pPrint)
-import Control.Monad.State (MonadState, get, modify, evalStateT, liftIO, evalState, gets, StateT)
+import Control.Monad.State (MonadState, get, modify, evalState, gets)
 import Data.Text (Text)
 import qualified Data.Text as Text
-import Data.Foldable (Foldable (foldl'), toList, fold)
+import Data.Foldable (Foldable (foldl'), toList)
 import Prelude hiding (exp)
 import qualified Data.List.NonEmpty as NE
 import Data.List (elemIndex)
-import Data.Void (Void)
 import Control.Lens hiding (Context, from, to)
-import qualified Data.Text.IO as TIO
-import Data.Coerce (coerce)
-import qualified Streamly.Prelude as Stream
-import qualified Streamly.Console.Stdio as Stdio
-import qualified Streamly.Unicode.Stream as UniStream
-import qualified Streamly.Data.Fold as Fold
 
 data TermUp =
     Bound Int
@@ -79,7 +72,6 @@ evalDown (Inf t) env = evalUp t env
 
 quote :: Value -> TermDown
 quote = quote' 0
-
 
 quote' :: Int -> Value -> TermDown
 quote' i (VNeutral n) = Inf $ quoteNeutral i n
@@ -183,7 +175,7 @@ evaluateSt (Parser.StAssume items) = traverse assume items <&> EvAssumed
 
 evaluateSt (Parser.StExpr expr) = do
     ctx <- get
-    case compileExpr [] expr of
+    case compileExpr expr of
         Left err -> pure $ EvError err
         Right compiledExpr ->
             case compiledExpr of
@@ -216,41 +208,38 @@ type2type (Parser.TFun from to) = TFun (type2type from) (type2type to)
 type CompilationResult a = Either Text a
 type Bindings = [Parser.Identifier]
 
-compileExpr :: Bindings -> Parser.Expr -> CompilationResult Expression
-compileExpr bs (Parser.Var n) =
+compileExpr :: Parser.Expr -> CompilationResult Expression
+compileExpr = compileExpr' []
+
+compileExpr' :: Bindings -> Parser.Expr -> CompilationResult Expression
+compileExpr' bs (Parser.Var n) =
     pure . ExprUp $ replacement
     where replacement =
             case elemIndex n bs of
                 Nothing -> Free $ id2id n
                 Just i -> Bound i
 
-compileExpr bs (Parser.Ann exp typ) = do
-    term <- compileExpr bs exp
+compileExpr' bs (Parser.Ann exp typ) = do
+    term <- compileExpr' bs exp
     pure $ ExprUp (Ann (toTermDown term) (type2type typ))
 
-compileExpr bs (Parser.App f args) = do
-  argTerms <- traverse (fmap toTermDown . compileExpr bs) args
-  fTerm <- compileExpr bs f >>= toTermUp
+compileExpr' bs (Parser.App f args) = do
+  argTerms <- traverse (fmap toTermDown . compileExpr' bs) args
+  fTerm <- compileExpr' bs f >>= toTermUp
   -- fixme should this be foldl' ?
   pure . ExprUp $ foldl' App fTerm argTerms
 
-compileExpr bs (Parser.Lambda ids body) =
+compileExpr' bs (Parser.Lambda ids body) =
     compileLambda bs ids body
 
 
 compileLambda :: Bindings -> NE.NonEmpty Parser.Identifier -> Parser.Expr -> CompilationResult Expression
 compileLambda bs ids body =
-    wrap <$> compileExpr newBindings body
+    wrap <$> compileExpr' newBindings body
     where
         newBindings = reverse (toList ids) <> bs
 
         wrap exp = iterate (ExprDown . Lambda . toTermDown) exp !! length ids
-
-
-
-expandMultiArgs :: NE.NonEmpty Parser.Identifier -> Parser.Expr -> Parser.Expr
-expandMultiArgs ids body = foldr go body ids
-    where go arg = Parser.Lambda (NE.singleton arg)
 
 
 toTermDown :: Expression -> TermDown
@@ -262,37 +251,6 @@ toTermUp (ExprDown (Inf e)) = pure e --fixme is it OK to make this transformatio
 toTermUp (ExprDown _) = throwError "Lambdas must be annotated with their type"
 toTermUp (ExprUp u) = pure u
 
-
-repl :: MonadState Context m => (EvalResult -> m ()) -> (ParseErrorBundle Text Void -> m ()) -> Text -> m ()
-repl showResult showParseError statement =  do
-    case runParser Parser.statementParser "input" statement of
-        Left err -> showParseError err
-        Right parsed -> do
-            res <- evaluateSt parsed
-            showResult res
-
-emptyContext :: Context
-emptyContext = []
-
-printingRepl :: Stream.SerialT (StateT Context IO) Text -> IO ()
-printingRepl stream = 
-    stream
-        & Stream.mapM (repl (liftIO . printEvalRes) (liftIO . print))
-        & Stream.drain
-        & flip evalStateT emptyContext
-
-basicRepl :: NE.NonEmpty Text -> IO ()
-basicRepl inputs =
-    inputs
-        & Stream.fromFoldable
-        & printingRepl 
-
-ioRepl :: IO ()
-ioRepl =
-    Stream.unfold Stdio.read ()
-        & UniStream.decodeUtf8
-        & Stream.splitOnSuffix (== '\n') (Fold.foldl' Text.snoc "")
-        & printingRepl
 
 
 type NamePool = [Text]
@@ -330,7 +288,6 @@ displayName (Local _) = error "local display"
 displayName (Quote _) = error "quote display"
 
 
-
 display :: TermDown -> Text
 display term = evalState (displayDown [] term) nameSource
 
@@ -338,17 +295,6 @@ nameSource :: NamePool
 nameSource = usual ++ (("a" <>) .  Text.pack . show <$> [(1 :: Int)..])
     where usual = ["x", "y", "z", "u", "v", "w", "r", "s", "t"]
   
-
-
-printEvalRes :: EvalResult -> IO ()
-printEvalRes (EvAssumed ids) = TIO.putStrLn $ "Assumed: " <> names
-    where names = fold $ NE.intersperse ", " (identifier2text <$> ids)
-printEvalRes (EvError err) = putStrLn $ "Error: " <> show err
-printEvalRes (EvRes val typ) =
-    TIO.putStrLn $ display (quote val) <> " :: " <> displayType typ
-
-identifier2text :: Parser.Identifier -> Text
-identifier2text = coerce
 
 -- samples
 id' :: TermDown
@@ -435,46 +381,13 @@ test = do
 
     --- fixme space before input
 
-    pPrint $ expandMultiArgs ["x"] (Parser.Var "x")
-    pPrint $ expandMultiArgs ["x", "y"] (Parser.Var "x")
-    pPrint $ expandMultiArgs ["x", "y", "z"] (Parser.Lambda ["w"] (Parser.Var "y"))
-
-    pPrint $ compileExpr [] (Parser.Var "x")
-    pPrint $ compileExpr [] (Parser.Ann (Parser.Var "x") (Parser.TId "foo") )
-    pPrint $ compileExpr [] (Parser.Lambda ["x"] (Parser.Var "x")  )
-    pPrint $ compileExpr [] (Parser.Lambda ["x"] (Parser.Var "y")  )
-    pPrint $ compileExpr [] (Parser.Lambda ["x", "y"] (Parser.Var "x")  )
-    pPrint $ compileExpr [] (Parser.Lambda ["x", "y"] (Parser.Var "y")  )
-    pPrint $ compileExpr [] (Parser.Lambda ["x", "y"] (Parser.Lambda ["x"] (Parser.Var "x"))  )
-    pPrint $ compileExpr [] (Parser.App (Parser.Lambda ["x", "y"] (Parser.Lambda ["x"] (Parser.Var "x"))  ) [Parser.Var "x", Parser.Var "y"] )
+    pPrint $ compileExpr  (Parser.Var "x")
+    pPrint $ compileExpr (Parser.Ann (Parser.Var "x") (Parser.TId "foo") )
+    pPrint $ compileExpr (Parser.Lambda ["x"] (Parser.Var "x")  )
+    pPrint $ compileExpr (Parser.Lambda ["x"] (Parser.Var "y")  )
+    pPrint $ compileExpr (Parser.Lambda ["x", "y"] (Parser.Var "x")  )
+    pPrint $ compileExpr (Parser.Lambda ["x", "y"] (Parser.Var "y")  )
+    pPrint $ compileExpr (Parser.Lambda ["x", "y"] (Parser.Lambda ["x"] (Parser.Var "x"))  )
+    pPrint $ compileExpr (Parser.App (Parser.Lambda ["x", "y"] (Parser.Lambda ["x"] (Parser.Var "x"))  ) [Parser.Var "x", Parser.Var "y"] )
 
 
-    basicRepl
-        [ "assume (alpha :: *) (beta :: *)"
-        , "assume (a :: alpha) (b :: beta)"
-        , "((λx -> x) :: alpha -> alpha) a"
-        ]
-
-    putStrLn "///////////////////////////"
-
-
-    basicRepl
-        [ "assume (α :: *) (y :: α)"
-        , "((λx → x) :: α → α) y"
-        , "assume (β :: *) "
-        , "((λx y → x) :: (β → β) → α → β → β) (λx → x) y"
-        ]
-
-    putStrLn "///////////////////////////"
-    basicRepl
-        [ "assume (α :: *) (y :: α)"
-        , "((λx → x) :: α → α) y"
-        , "assume (β :: *) "
-        , "((λx y → x) :: (β → β) → α → β → β) "
-        ]
-
-    putStrLn "///////////////////////////"
-    basicRepl
-        [ "assume (β :: *) (f :: β -> β) (b :: β)"
-        , "((\\x -> x ) :: β -> β) (f b)"
-        ]

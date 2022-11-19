@@ -1,7 +1,7 @@
 module Main where
 
-import qualified Lambda
+import qualified Repl
 
 main :: IO ()
 main = do
-    Lambda.ioRepl
+    Repl.ioRepl
