@@ -5,25 +5,25 @@
 module Lambda where
 
 import Control.Monad.Except (throwError)
-import Data.Functor (($>), void)
+import Data.Functor (($>))
 import Control.Monad (unless)
 import Text.Megaparsec (runParser, ParseErrorBundle)
 import qualified Parser
 import Text.Pretty.Simple (pPrint)
-import Control.Monad.State (MonadState, get, modify, runState, put, evalStateT, liftIO, evalState, gets)
+import Control.Monad.State (MonadState, get, modify, evalStateT, liftIO, evalState, gets, StateT)
 import Data.Text (Text)
 import qualified Data.Text as Text
-import Data.Foldable (traverse_, Foldable (foldl'), toList, fold)
+import Data.Foldable (Foldable (foldl'), toList, fold)
 import Prelude hiding (exp)
 import qualified Data.List.NonEmpty as NE
 import Data.List (elemIndex)
 import Data.Void (Void)
-import Control.Lens hiding (Context)
+import Control.Lens hiding (Context, from, to)
 import qualified Data.Text.IO as TIO
 import Data.Coerce (coerce)
 import qualified Streamly.Prelude as Stream
 import qualified Streamly.Console.Stdio as Stdio
-import qualified Streamly.Data.Unicode.Stream as UniStream
+import qualified Streamly.Unicode.Stream as UniStream
 import qualified Streamly.Data.Fold as Fold
 
 data TermUp =
@@ -274,21 +274,25 @@ repl showResult showParseError statement =  do
 emptyContext :: Context
 emptyContext = []
 
-basicRepl :: NE.NonEmpty Text -> IO ()
-basicRepl inputs = 
-    Stream.fromFoldable inputs
+printingRepl :: Stream.SerialT (StateT Context IO) Text -> IO ()
+printingRepl stream = 
+    stream
         & Stream.mapM (repl (liftIO . printEvalRes) (liftIO . print))
         & Stream.drain
         & flip evalStateT emptyContext
+
+basicRepl :: NE.NonEmpty Text -> IO ()
+basicRepl inputs =
+    inputs
+        & Stream.fromFoldable
+        & printingRepl 
 
 ioRepl :: IO ()
 ioRepl =
     Stream.unfold Stdio.read ()
         & UniStream.decodeUtf8
         & Stream.splitOnSuffix (== '\n') (Fold.foldl' Text.snoc "")
-        & Stream.mapM (repl (liftIO . printEvalRes) (liftIO . print))
-        & Stream.drain
-        & flip evalStateT emptyContext
+        & printingRepl
 
 
 type NamePool = [Text]
@@ -322,8 +326,8 @@ displayType (TFun from to) = "(" <> displayType from <> " → " <> displayType t
 
 displayName :: Name -> Text
 displayName (Global t) = t
-displayName (Local n) = error "local display"
-displayName (Quote n) = error "quote display"
+displayName (Local _) = error "local display"
+displayName (Quote _) = error "quote display"
 
 
 
