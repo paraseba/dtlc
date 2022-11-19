@@ -81,8 +81,12 @@ quote' i (VNeutral n) = Inf $ quoteNeutral i n
 quote' i (VFun f) = Lambda $ quote' (i+1) $ f (VNeutral (NFree (Quote i)))
 
 quoteNeutral :: Int -> Neutral -> TermUp
-quoteNeutral _ (NFree n) = Free n
+quoteNeutral i (NFree n) = replaceQuote i n
 quoteNeutral i (NApp f arg) = App (quoteNeutral (i+1) f) (quote' (i+1) arg)
+
+replaceQuote :: Int -> Name -> TermUp
+replaceQuote i (Quote n) = Bound (i - n - 1)
+replaceQuote _ x = Free x
 
 data Kind = Star
     deriving (Show, Eq)
@@ -441,7 +445,7 @@ test = do
     basicRepl
         [ "assume (alpha :: *) (beta :: *)"
         , "assume (a :: alpha) (b :: beta)"
-        , "((\\x -> x) :: alpha -> alpha) a"
+        , "((λx -> x) :: alpha -> alpha) a"
         ]
 
     putStrLn "///////////////////////////"
