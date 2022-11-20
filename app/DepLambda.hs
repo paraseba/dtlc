@@ -28,6 +28,10 @@ data TermUp =
     | Ann TermDown TermDown
     | App TermUp TermDown
     | Pi TermDown TermDown
+    | Nat
+    | Zero
+    | Succ TermDown
+    | NatElim TermDown TermDown TermDown TermDown
     deriving (Show, Eq)
 
 data TermDown =
@@ -47,14 +51,22 @@ data Value =
     | VNeutral Neutral
     | VPi Value (Value -> Value)
     | VFun (Value -> Value)
+    | VNat
+    | VZero
+    | VSucc Value
 
 data Neutral =
     NFree Name
     | NApp Neutral Value
+    | NNatElim  Value Value Value Neutral
 
 type Type = Value
 
 type Env = [Value]
+
+vapp :: Value -> Value -> Value
+vapp (VFun f) v = f v
+vapp (VNeutral n) v = VNeutral (NApp n v)
 
 evalUp :: Env -> TermUp -> Value
 evalUp _ Star = VStar
@@ -64,11 +76,27 @@ evalUp env (Ann t _) = evalDown env t
 evalUp env (App fterm arg) =
     case evalUp env fterm of
         VFun fvalue -> fvalue argEval
-        VNeutral n -> VNeutral (NApp n argEval)
+        n@(VNeutral _) -> vapp n argEval
         _ -> error "fixme"
     where argEval = evalDown env arg
 evalUp env (Pi t t') =
     VPi (evalDown env t) (\arg -> evalDown (arg:env) t')
+evalUp _ Nat = VNat
+evalUp _ Zero = VZero
+evalUp env (Succ n) = VSucc (evalDown env n)
+evalUp env (NatElim m mz ms k) =
+    case kVal of
+       VZero -> mzVal
+       VSucc l -> let rec = evalUp env (NatElim m mz ms (quote l))
+                  in msVal `vapp` l `vapp` rec
+       VNeutral k' -> VNeutral $ NNatElim mVal mzVal msVal k'
+
+       _ -> error "Internal error, natElim'ing not a number"
+    where
+        mzVal = evalDown env mz
+        msVal = evalDown env ms
+        kVal = evalDown env k
+        mVal = evalDown env m
 
 
 evalDown :: Env -> TermDown  -> Value
@@ -90,11 +118,20 @@ quote' i (VFun f) =
     Lambda $ quote' (i+1) $ f (VNeutral (NFree (Quote i)))
 quote' i (VPi v f) =
     Inf $ Pi (quote' i v) $ quote' (i+1) $ f (VNeutral (NFree (Quote i)))
+quote' _ VNat = Inf Nat
+quote' _ VZero = Inf Zero
+quote' i (VSucc n) = Inf (Succ $ quote' i n)
 
 quoteNeutral :: Int -> Neutral -> TermUp
 quoteNeutral i (NFree n) = replaceQuote i n
 quoteNeutral i (NApp f arg) =
     App (quoteNeutral (i+1) f) (quote' (i+1) arg)
+
+quoteNeutral i (NNatElim t1 t2 t3 n) =
+    NatElim (quote' i t1)
+            (quote' i t2)
+            (quote' i t3)
+            (Inf (quoteNeutral i n))
 
 replaceQuote :: Int -> Name -> TermUp
 replaceQuote i (Quote n) = Bound (i - n - 1)
@@ -139,6 +176,20 @@ typeUp' i ctx (Pi rho rho') = do
     typeDown' (i + 1) ((Local i, tau):ctx) (substDown 0 (Free (Local i)) rho') VStar
     pure VStar
 
+typeUp' _ _ Nat = pure VStar
+typeUp' _ _ Zero = pure VNat
+typeUp' i ctx (Succ n) = typeDown' i ctx n VNat $> VNat
+typeUp' i ctx (NatElim m mz ms k) = do
+    typeDown' i ctx m (VPi VNat (const VStar))
+    let tau = mVal `vapp` VZero
+    typeDown' i ctx mz tau
+    typeDown' i ctx k VNat
+    typeDown' i ctx ms (VPi VNat (\l -> VPi (mVal `vapp` l) (\_ -> mVal `vapp` VSucc l)))
+    pure (mVal `vapp` kVal)
+    where
+        mVal = evalDown [] m
+        kVal = evalDown [] k
+
 
 
 typeDown' :: Int -> Context -> TermDown -> Type -> TypingResult ()
@@ -181,6 +232,16 @@ substUp i replacement (App fterm argterm) =
 substUp i replacement (Pi tau tau') =
     Pi (substDown i replacement tau) (substDown (i + 1) replacement tau')
 
+substUp _ _ Nat = Nat
+substUp _ _ Zero = Zero
+substUp i r (Succ n) = Succ $ substDown i r n
+substUp i r (NatElim t1 t2 t3 t4) =
+    NatElim (substDown i r t1)
+            (substDown i r t2)
+            (substDown i r t3)
+            (substDown i r t4)
+
+
 
 test :: IO ()
 test = do
@@ -198,22 +259,32 @@ test = do
         expr = App id' (Inf $ Free $ Global "Bool")
         expr2 = App expr (Inf $ Free $ Global "False")
 
-    -- pPrint $ quote $ evalUp emptyEnv expr
-    --
-    -- pPrint $ quote <$> typeUp [] (Pi (Inf Star) (Inf $ Pi (Inf $ Bound 0) (Inf $ Bound 1)))
-    -- pPrint $ quote <$> typeUp [] id'
     pPrint $ quote <$> typeUp [(Global "Bool", VStar), (Global "False", VNeutral (NFree $ Global "Bool"))] expr
     pPrint $ quote <$> typeUp [(Global "Bool", VStar), (Global "False", VNeutral (NFree $ Global "Bool"))] expr2
     pPrint $ quote $ evalUp emptyEnv expr2
 
+    putStrLn "////////////////"
+
+    let two = Inf $ Succ (Inf $ Succ $ Inf Zero)
+        three = Inf $ Succ two
+        plus =
+            NatElim (Lambda (Inf (Pi (Inf Nat) (Inf Nat))))
+                    (Lambda (Inf (Bound 0)))
+                    (Lambda (Lambda (Lambda (Inf $ Succ $ Inf (App (Bound 1) (Inf $ Bound 0))))))
+                    -- two
+
+
+    pPrint $ quote $ evalUp emptyEnv (App (plus two) three)
+    pPrint $ quote <$> typeUp [] (App (plus two) three)
+    pPrint $ quote <$> typeUp [] (plus two)
 
     {- 
 
-〉〉 let id = (λα x → x) :: ∀(α :: ∗).α → α
-id :: ∀(x :: ∗) (y :: x).x
-〉〉 assume (Bool :: ∗) (False :: Bool)
-〉〉 id Bool
-λx → x :: ∀x :: Bool.Bool
-〉〉 id Bool False
-False :: Bool
+〉〉 let plus = natElim (λ → Nat → Nat)
+(λn → n)
+(λk rec n → Succ (rec n))
+plus :: ∀(x :: Nat) (y :: Nat).Nat
+
+
+
     -}
