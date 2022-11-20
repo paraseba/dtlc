@@ -19,6 +19,7 @@ import Prelude hiding (exp)
 import qualified Data.List.NonEmpty as NE
 import Data.List (elemIndex)
 import Control.Lens hiding (Context, from, to)
+import Debug.Trace
 
 data TermUp =
     Star
@@ -27,12 +28,12 @@ data TermUp =
     | Ann TermDown TermDown
     | App TermUp TermDown
     | Pi TermDown TermDown
-    deriving (Show)
+    deriving (Show, Eq)
 
 data TermDown =
     Inf TermUp
     | Lambda TermDown
-    deriving (Show)
+    deriving (Show, Eq)
 
 
 data Name =
@@ -67,7 +68,7 @@ evalUp env (App fterm arg) =
         _ -> error "fixme"
     where argEval = evalDown env arg
 evalUp env (Pi t t') =
-    VPi (evalDown env t) (\arg -> evalDown (arg:env) t') 
+    VPi (evalDown env t) (\arg -> evalDown (arg:env) t')
 
 
 evalDown :: Env -> TermDown  -> Value
@@ -75,6 +76,9 @@ evalDown env (Lambda t) =
     VFun (\arg -> evalDown (arg:env) t)
 
 evalDown env (Inf t) = evalUp env t
+
+emptyEnv :: Env
+emptyEnv = []
 
 quote :: Value -> TermDown
 quote = quote' 0
@@ -100,7 +104,116 @@ replaceQuote _ x = Free x
 type TypingResult a = Either Text a
 type Context = [(Name, Type)]
 
+
+typeUp :: Context -> TermUp -> TypingResult Type
+typeUp = typeUp' 0
+
+typeUp' :: Int -> Context -> TermUp -> TypingResult Type
+typeUp' _ _ (Bound _) = throwError "This should never be called"
+
+typeUp' _ ctx (Free name) =
+    case lookup name ctx of
+        Just typ  -> pure typ
+        _ -> throwError $ "Name not found " <> Text.pack (show name)
+
+typeUp' i ctx (Ann e rho) = do
+    typeDown' i ctx rho VStar
+    let tau = evalDown emptyEnv rho
+    typeDown' i ctx e tau
+    pure tau
+
+typeUp' _ _ Star = pure VStar
+
+typeUp' i ctx (App e e') = do
+    ftype <- typeUp' i ctx e
+    case ftype of
+        VPi tau tau' -> do
+            typeDown' i ctx e' tau
+            pure $ tau' (evalDown emptyEnv e')
+        _ -> throwError "Invalid application"
+
+typeUp' i ctx (Pi rho rho') = do
+-- (Pi (Inf Star) (Inf $ Bound 0))
+    typeDown' i ctx rho VStar
+    let tau = evalDown emptyEnv rho
+    typeDown' (i + 1) ((Local i, tau):ctx) (substDown 0 (Free (Local i)) rho') VStar
+    pure VStar
+
+
+
+typeDown' :: Int -> Context -> TermDown -> Type -> TypingResult ()
+typeDown' i ctx (Lambda e) (VPi tau tau')  =
+    typeDown' (i + 1)
+              ((Local i, tau) : ctx)
+              (substDown 0 (Free (Local i)) e)
+              (tau' (VNeutral (NFree (Local i))))
+
+typeDown' _ _ (Lambda _) x  = throwError $ "Cannot type lambda: " <> Text.pack (show (quote x))
+
+typeDown' i ctx (Inf e) v = do
+    actual <- typeUp' i ctx e
+    unless (quote actual == quote v) $
+        throwError "Type mismatch"
+
+substDown :: Int -> TermUp -> TermDown -> TermDown
+substDown i replacement (Lambda t) =
+    Lambda (substDown (i + 1) replacement t)
+
+substDown i replacement (Inf t) =
+    Inf (substUp i replacement t)
+
+substUp :: Int -> TermUp -> TermUp -> TermUp
+substUp _ _ Star = Star
+
+substUp i replacement (Bound n)
+    | i == n = replacement
+    | otherwise = Bound n
+
+substUp _ _ (Free name) = Free name
+
+substUp i replacement (Ann e tau) =
+    Ann (substDown i replacement e) (substDown i replacement tau)
+
+substUp i replacement (App fterm argterm) =
+    App (substUp i replacement fterm)
+        (substDown i replacement argterm)
+
+substUp i replacement (Pi tau tau') =
+    Pi (substDown i replacement tau) (substDown (i + 1) replacement tau')
+
+
 test :: IO ()
 test = do
+{-
     pPrint $ quote (evalUp [] Star)
     pPrint $ quote (evalUp [] (Pi (Inf $ Free (Global "a")) (Inf $ Free (Global "a"))))
+    putStrLn "////////////////"
+    -}
+
+    let id' =
+            Ann
+                (Lambda (Lambda (Inf $ Bound 0)))
+                (Inf $ Pi (Inf Star) (Inf $ Pi (Inf $ Bound 0) (Inf $ Bound 1)))
+
+        expr = App id' (Inf $ Free $ Global "Bool")
+        expr2 = App expr (Inf $ Free $ Global "False")
+
+    -- pPrint $ quote $ evalUp emptyEnv expr
+    --
+    -- pPrint $ quote <$> typeUp [] (Pi (Inf Star) (Inf $ Pi (Inf $ Bound 0) (Inf $ Bound 1)))
+    -- pPrint $ quote <$> typeUp [] id'
+    pPrint $ quote <$> typeUp [(Global "Bool", VStar), (Global "False", VNeutral (NFree $ Global "Bool"))] expr
+    pPrint $ quote <$> typeUp [(Global "Bool", VStar), (Global "False", VNeutral (NFree $ Global "Bool"))] expr2
+    pPrint $ quote $ evalUp emptyEnv expr2
+
+
+    {- 
+
+〉〉 let id = (λα x → x) :: ∀(α :: ∗).α → α
+id :: ∀(x :: ∗) (y :: x).x
+〉〉 assume (Bool :: ∗) (False :: Bool)
+〉〉 id Bool
+λx → x :: ∀x :: Bool.Bool
+〉〉 id Bool False
+False :: Bool
+    -}
