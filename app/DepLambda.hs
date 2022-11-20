@@ -20,6 +20,7 @@ import qualified Data.List.NonEmpty as NE
 import Data.List (elemIndex)
 import Control.Lens hiding (Context, from, to)
 import Debug.Trace
+import Numeric.Natural (Natural)
 
 data TermUp =
     Star
@@ -242,6 +243,10 @@ substUp i r (NatElim t1 t2 t3 t4) =
             (substDown i r t4)
 
 
+nat2nat :: Natural -> TermUp
+nat2nat 0 = Zero
+nat2nat n = Succ $ Inf $ nat2nat (n - 1)
+-- nat2nat n = Succ $ iterate (Inf . Succ) (Inf Zero) !! (fromIntegral n - 1)
 
 test :: IO ()
 test = do
@@ -250,6 +255,10 @@ test = do
     pPrint $ quote (evalUp [] (Pi (Inf $ Free (Global "a")) (Inf $ Free (Global "a"))))
     putStrLn "////////////////"
     -}
+    pPrint $ nat2nat 0
+    pPrint $ nat2nat 1
+    pPrint $ nat2nat 2
+    pPrint $ nat2nat 3
 
     let id' =
             Ann
@@ -265,8 +274,8 @@ test = do
 
     putStrLn "////////////////"
 
-    let two = Inf $ Succ (Inf $ Succ $ Inf Zero)
-        three = Inf $ Succ two
+    let two = Inf $ nat2nat 2
+        three = Inf $ nat2nat 3
         plus =
             NatElim (Lambda (Inf (Pi (Inf Nat) (Inf Nat))))
                     (Lambda (Inf (Bound 0)))
