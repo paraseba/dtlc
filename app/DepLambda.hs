@@ -29,10 +29,27 @@ data TermUp =
     | Ann TermDown TermDown
     | App TermUp TermDown
     | Pi TermDown TermDown
+
     | Nat
     | Zero
     | Succ TermDown
     | NatElim TermDown TermDown TermDown TermDown
+
+    | Vec TermDown TermDown   -- Vec :: Pi (α :: *). Pi (n :: Nat). *
+    | Nil TermDown            -- Nil :: Pi (α :: *). Vec α Zero
+    | Cons TermDown           -- Cons :: Pi (α :: *).
+           TermDown           --         Pi (n :: Nat).
+           TermDown           --         α -> 
+           TermDown           --         Vec α n ->
+                              --         Vec α (Succ n)
+
+    | VecElim TermDown        -- VecElim :: Pi (α :: *).
+              TermDown        --            Pi (m :: Pi (k :: Nat). Vec α k -> *).
+              TermDown        --            m Zero (Nil α) ->
+              TermDown        --            Pi (k :: Nat). Pi (a :: α). Pi (as :: Vec α k). m k as -> m (Succ k) (Cons α k a as)
+              TermDown        --            Pi (k :: Nat).
+              TermDown        --            Pi xs :: Vec α k.
+                              --            m k xs
     deriving (Show, Eq)
 
 data TermDown =
@@ -52,14 +69,20 @@ data Value =
     | VNeutral Neutral
     | VPi Value (Value -> Value)
     | VFun (Value -> Value)
+
     | VNat
     | VZero
     | VSucc Value
+
+    | VVec Value Value
+    | VNil Value
+    | VCons Value Value Value Value
 
 data Neutral =
     NFree Name
     | NApp Neutral Value
     | NNatElim  Value Value Value Neutral
+    | NVecElim  Value Value Value Value Value Neutral
 
 type Type = Value
 
@@ -82,6 +105,7 @@ evalUp env (App fterm arg) =
     where argEval = evalDown env arg
 evalUp env (Pi t t') =
     VPi (evalDown env t) (\arg -> evalDown (arg:env) t')
+
 evalUp _ Nat = VNat
 evalUp _ Zero = VZero
 evalUp env (Succ n) = VSucc (evalDown env n)
@@ -99,6 +123,29 @@ evalUp env (NatElim m mz ms k) =
         kVal = evalDown env k
         mVal = evalDown env m
 
+evalUp env (Vec alpha n) = VVec (evalDown env alpha) (evalDown env n)
+evalUp env (Nil alpha) = VNil (evalDown env alpha)
+evalUp env (Cons alpha n a more) =
+    VCons (evalDown env alpha) (evalDown env n)
+          (evalDown env a) (evalDown env more)
+evalUp env (VecElim alpha m mnil mcons k as) =
+    iter kVal (evalDown env as)
+    where
+        iter _ (VNil _) = mnilVal
+        iter _ (VCons _ n a more) =
+            mconsVal `vapp` n `vapp` a `vapp` more `vapp` iter n more
+
+        iter _ (VNeutral v') =
+            VNeutral $ NVecElim alphaVal mVal mnilVal mconsVal kVal v'
+            -- fixme why not store as too
+
+        iter _ _ = error "Internal error, vecElim'ing not a vector"
+
+        mnilVal = evalDown env mnil
+        mconsVal = evalDown env mcons
+        kVal = evalDown env k
+        alphaVal = evalDown env alpha
+        mVal = evalDown env m
 
 evalDown :: Env -> TermDown  -> Value
 evalDown env (Lambda t) =
@@ -119,9 +166,16 @@ quote' i (VFun f) =
     Lambda $ quote' (i+1) $ f (VNeutral (NFree (Quote i)))
 quote' i (VPi v f) =
     Inf $ Pi (quote' i v) $ quote' (i+1) $ f (VNeutral (NFree (Quote i)))
+
 quote' _ VNat = Inf Nat
 quote' _ VZero = Inf Zero
 quote' i (VSucc n) = Inf (Succ $ quote' i n)
+
+quote' i (VVec alpha n) = Inf $ Vec (quote' i alpha) (quote' i n)
+quote' i (VNil alpha) = Inf $ Nil (quote' i alpha)
+quote' i (VCons alpha n a more) =
+    Inf $ Cons (quote' i alpha) (quote' i n)
+               (quote' i a) (quote' i more)
 
 quoteNeutral :: Int -> Neutral -> TermUp
 quoteNeutral i (NFree n) = replaceQuote i n
@@ -132,6 +186,14 @@ quoteNeutral i (NNatElim t1 t2 t3 n) =
     NatElim (quote' i t1)
             (quote' i t2)
             (quote' i t3)
+            (Inf (quoteNeutral i n))
+
+quoteNeutral i (NVecElim t1 t2 t3 t4 t5 n) =
+    VecElim (quote' i t1)
+            (quote' i t2)
+            (quote' i t3)
+            (quote' i t4)
+            (quote' i t5)
             (Inf (quoteNeutral i n))
 
 replaceQuote :: Int -> Name -> TermUp
@@ -191,7 +253,43 @@ typeUp' i ctx (NatElim m mz ms k) = do
         mVal = evalDown [] m
         kVal = evalDown [] k
 
-
+typeUp' i ctx (Vec alpha n) = do
+    typeDown' i ctx alpha VStar
+    typeDown' i ctx n VNat
+    pure VStar
+typeUp' i ctx (Nil alpha) = do
+    typeDown' i ctx alpha VStar
+    pure $ VVec (evalDown emptyEnv alpha) VZero
+typeUp' i ctx (Cons alpha n a more) = do
+    typeDown' i ctx alpha VStar
+    typeDown' i ctx n VNat
+    typeDown' i ctx a alphaVal
+    typeDown' i ctx more (VVec alphaVal nVal)
+    pure $ VVec alphaVal (VSucc nVal)
+    -- why not checking relationship between n and more or that n > 0
+    where
+        nVal = evalDown emptyEnv n
+        alphaVal = evalDown emptyEnv alpha
+typeUp' i ctx (VecElim alpha m mnil mcons k as) = do --fixme
+    typeDown' i ctx alpha VStar
+    typeDown' i ctx m (VPi VNat (\n -> VPi (VVec alphaVal n) (const VStar)))
+    let tau = mVal `vapp` VZero `vapp` VNil alphaVal
+    typeDown' i ctx mnil tau
+    typeDown' i ctx mcons
+              (VPi VNat $ \l ->
+                VPi alphaVal $ \a ->
+                VPi (VVec alphaVal l) $ \xs ->
+                VPi (mVal `vapp` l `vapp` xs) $ \_ ->
+                mVal `vapp` VSucc l `vapp` VCons alphaVal l a xs
+              )
+    typeDown' i ctx k VNat
+    typeDown' i ctx as (VVec alphaVal kVal)
+    pure $ mVal `vapp` kVal `vapp` asVal
+    where
+        mVal = evalDown [] m
+        alphaVal = evalDown [] alpha
+        kVal = evalDown [] k
+        asVal = evalDown [] as
 
 typeDown' :: Int -> Context -> TermDown -> Type -> TypingResult ()
 typeDown' i ctx (Lambda e) (VPi tau tau')  =
@@ -242,6 +340,20 @@ substUp i r (NatElim t1 t2 t3 t4) =
             (substDown i r t3)
             (substDown i r t4)
 
+substUp i r (Vec alpha n) = Vec (substDown i r alpha) (substDown i r n)
+substUp i r (Nil alpha) = Nil (substDown i r alpha)
+substUp i r (Cons alpha n a more) =
+    Cons (substDown i r alpha) (substDown i r n)
+    (substDown i r a) (substDown i r more)
+
+substUp i r (VecElim t1 t2 t3 t4 t5 t6) =
+    VecElim (substDown i r t1)
+            (substDown i r t2)
+            (substDown i r t3)
+            (substDown i r t4)
+            (substDown i r t5)
+            (substDown i r t6)
+
 
 nat2nat :: Natural -> TermUp
 nat2nat 0 = Zero
@@ -287,13 +399,7 @@ test = do
     pPrint $ quote <$> typeUp [] (App (plus two) three)
     pPrint $ quote <$> typeUp [] (plus two)
 
-    {- 
-
-〉〉 let plus = natElim (λ → Nat → Nat)
-(λn → n)
-(λk rec n → Succ (rec n))
-plus :: ∀(x :: Nat) (y :: Nat).Nat
+    
+    putStrLn "////////////////"
 
 
-
-    -}
