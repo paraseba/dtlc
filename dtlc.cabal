@@ -1,0 +1,75 @@
+cabal-version:      3.4
+name:               dtlc
+
+version:            0.1.0.0
+
+synopsis: A dependently type lambda calculus
+
+description:
+    Based on: A. L ̈oh, C. McBride, W. Swierstra "A tutorial implementation of a dependently typed lambda calculus"
+
+license:            GPL-3.0-only
+
+license-file:       LICENSE
+
+author:             Sebastian Galkin
+
+maintainer:         paraseba@gmail.com
+
+category:           Language
+build-type:         Simple
+
+extra-doc-files:    CHANGELOG.md
+
+common warnings
+    ghc-options: -Wall
+
+library
+    import:           warnings
+
+    exposed-modules:  DTLC.Parser
+                    , DTLC.Repl
+                    , DTLC.Lambda
+
+    build-depends:    base
+                    , mtl
+                    , text
+                    , megaparsec
+                    , parser-combinators
+                    , pretty-simple
+                    , lens
+                    , streamly
+
+    hs-source-dirs:   src
+
+    default-language: GHC2021
+
+executable dtlc
+    import:           warnings
+    main-is:          app/Main.hs
+
+    build-depends:    base
+                    , dtlc
+
+    default-language: GHC2021
+
+test-suite test
+  import:           warnings
+  default-language:
+    GHC2021
+  type:
+    exitcode-stdio-1.0
+  hs-source-dirs:
+    tests
+  main-is:
+    test.hs
+  build-depends:
+      base
+    , tasty
+    , tasty-hedgehog
+    , tasty-hunit
+    , megaparsec
+    , text
+    , lens
+    , pretty-simple
+    , dtlc

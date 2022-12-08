@@ -1,24 +1,20 @@
-{-# LANGUAGE FlexibleContexts #-}
-{-# LANGUAGE OverloadedLists #-}
 {-# LANGUAGE OverloadedStrings #-}
 
-module DepLambda where
+module DTLC.Lambda where
 
 import Control.Lens hiding (Context, from, to)
-import Control.Lens qualified
 import Control.Monad (unless)
 import Control.Monad.Except (throwError)
-import Data.Foldable (foldrM, toList, foldlM)
+import DTLC.Parser qualified as P
+import Data.Foldable (foldlM, toList)
 import Data.Functor (($>))
 import Data.List (elemIndex)
 import Data.List.NonEmpty (NonEmpty)
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import Data.Text qualified as Text
-import DepParser qualified as P
 import Numeric.Natural (Natural)
 import Prelude hiding (exp, pi)
-import Debug.Trace
 
 data TermUp
     = Star
@@ -436,29 +432,31 @@ compileExpr' bs (P.Var n) =
             )
     vecElimTerm = Lambda $ Lambda $ Lambda $ Lambda $ Lambda $ Lambda $ Inf $ VecElim (bound 5) (bound 4) (bound 3) (bound 2) (bound 1) (bound 0)
     vecElimType =
-        pid Star $                                                           -- alpha
-            pid vecElimMType $                                               -- m
-                pid vecElimMNilType $                                        -- mnil
-                    pid vecElimConsType $                                    -- mcons
-                        pid Nat $                                            -- k
-                            pi (Vec (bound 4) (bound 0))                     -- xs
-                               vecElimReturnType                             -- m k xs
-
-    vecElimMType = Pi (Inf $ Nat)                                            -- k
-                      (pi (Vec (bound 1) (bound 0)) Star)                    -- Vec alpha k -> *
+        pid Star $ -- alpha
+            pid vecElimMType $ -- m
+                pid vecElimMNilType $ -- mnil
+                    pid vecElimConsType $ -- mcons
+                        pid Nat $ -- k
+                            pi
+                                (Vec (bound 4) (bound 0)) -- xs
+                                vecElimReturnType -- m k xs
+    vecElimMType =
+        Pi
+            (Inf $ Nat) -- k
+            (pi (Vec (bound 1) (bound 0)) Star) -- Vec alpha k -> *
     vecElimMNilType = App (App (Bound 0) (Inf $ Zero)) (Inf $ Nil (bound 1)) -- m Zero (Nil alpha)
     vecElimConsType =
-        Pi (Inf $ Nat) $                                                     -- l
+        Pi (Inf $ Nat) $ -- l
             Inf $
-                Pi (bound 3) $                                               -- x
+                Pi (bound 3) $ -- x
                     Inf $
-                        Pi (Inf $ Vec (bound 4) (bound 1)) $                 -- xs
-                            pi (App (App (Bound 4) (bound 2)) (bound 0)) $   -- m l xs
-                                ( App                                        -- m (Succ l) (Cons alpha l x xs)
+                        Pi (Inf $ Vec (bound 4) (bound 1)) $ -- xs
+                            pi (App (App (Bound 4) (bound 2)) (bound 0)) $ -- m l xs
+                                ( App -- m (Succ l) (Cons alpha l x xs)
                                     (App (Bound 5) (Inf $ Succ (bound 3)))
                                     (Inf $ Cons (bound 6) (bound 3) (bound 2) (bound 1))
                                 )
-    vecElimReturnType = App (App (Bound 4) (bound 1)) (bound 0)              -- m k xs
+    vecElimReturnType = App (App (Bound 4) (bound 1)) (bound 0) -- m k xs
 compileExpr' bs (P.Ann exp typ) =
     make <$> compileExpr' bs exp <*> compileExpr' bs typ
   where
@@ -474,7 +472,7 @@ compileExpr' bs (P.App f arg) = do
 compileExpr' bs (P.Function from to) =
     (\from' to' -> ExprUp $ Pi (toTermDown from') (toTermDown to'))
         <$> compileExpr' bs from
-        <*> compileExpr' ("": bs) to  -- the range needs to bind parameters one step farther
+        <*> compileExpr' ("" : bs) to -- the range needs to bind parameters one step farther
 compileExpr' bs (P.Pi args body) =
     compilePi bs args body
 compileExpr' bs (P.Lambda ids body) =
@@ -491,7 +489,7 @@ compileLambda bs ids body =
 
 compilePi :: LambdaBindings -> NonEmpty (P.Identifier, P.Expr) -> P.Expr -> CompilationResult Expression
 compilePi bs args body = do
-    compiledArgTypes <-  over mapped (reverse . fst) $ foldlM go' ([], bs) args
+    compiledArgTypes <- over mapped (reverse . fst) $ foldlM go' ([], bs) args
 
     -- let xx = compiledArgTypes ^. (_Right._1.Control.Lens.to reverse)
     compileExpr' newBindings body <&> wrap compiledArgTypes
@@ -499,14 +497,12 @@ compilePi bs args body = do
     newBindings = args ^.. reversed . folded . _1 <> bs
 
     wrap :: [Expression] -> Expression -> Expression
-    wrap argTypes exp = foldr go exp argTypes 
-
+    wrap argTypes exp = foldr go exp argTypes
 
     go' :: ([Expression], LambdaBindings) -> (P.Identifier, P.Expr) -> CompilationResult ([Expression], LambdaBindings)
     go' (compiled, currentBindings) (ident, typ) = do
         t <- compileExpr' currentBindings typ
-        pure (t : compiled, ident: currentBindings)
-
+        pure (t : compiled, ident : currentBindings)
 
     go :: Expression -> Expression -> Expression
     go exp res = ExprUp $ Pi (toTermDown exp) (toTermDown res)

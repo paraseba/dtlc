@@ -15,7 +15,7 @@
       let
         overlays = [ haskellNix.overlay
           (final: prev: {
-            depLambdaProject =
+            dtlcProject =
               final.haskell-nix.project' {
                 src = ./.;
                 compiler-nix-name = "ghc925";
@@ -36,10 +36,10 @@
           })
         ];
         pkgs = import nixpkgs { inherit system overlays; inherit (haskellNix) config; };
-        flake = pkgs.depLambdaProject.flake {};
+        flake = pkgs.dtlcProject.flake {};
       in flake // {
         legacyPackages = pkgs;
-        packages.default = flake.packages."deplambda:exe:deplambda";
+        packages.default = flake.packages."dtlc:exe:dtlc";
       });
 
   # --- Flake Local Nix Configuration ----------------------------

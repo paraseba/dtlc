@@ -1,24 +1,22 @@
 {-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE GeneralizedNewtypeDeriving #-}
-{-# LANGUAGE LambdaCase #-}
 
-module DepParser where
+module DTLC.Parser where
 
-import Prelude hiding (succ, pi, exp)
+import Prelude hiding (exp, pi, succ)
 
-import Text.Megaparsec
-import Text.Megaparsec.Char
-import Data.Text (Text)
-import Data.Void
-import qualified Text.Megaparsec.Char.Lexer as L
-import qualified Data.Text as T
-import Data.Functor (void, ($>))
-import Data.String (IsString)
-import qualified Data.List.NonEmpty as NE
+import Control.Monad.Combinators.Expr (Operator (..), makeExprParser)
 import Data.Foldable (asum)
+import Data.Functor (void, ($>))
+import Data.List.NonEmpty qualified as NE
+import Data.String (IsString)
+import Data.Text (Text)
+import Data.Text qualified as T
+import Data.Void (Void)
 import Numeric.Natural (Natural)
+import Text.Megaparsec
+import Text.Megaparsec.Char (alphaNumChar, char, eol, letterChar, space1)
 import Text.Megaparsec.Char.Lexer (decimal)
-import Control.Monad.Combinators.Expr (makeExprParser, Operator (..))
+import Text.Megaparsec.Char.Lexer qualified as L
 
 type Parser = Parsec Void Text
 
@@ -37,8 +35,8 @@ parens = between (symbol "(") (symbol ")")
 newtype Identifier = Identifier Text
     deriving (Eq, Show, IsString)
 
-data Expr =
-    Pi (NE.NonEmpty (Identifier, Expr)) Expr
+data Expr
+    = Pi (NE.NonEmpty (Identifier, Expr)) Expr
     | LiteralNat Natural
     | Function Expr Expr
     | Lambda (NE.NonEmpty Identifier) Expr
@@ -48,16 +46,14 @@ data Expr =
     | Star
     deriving (Eq, Show)
 
-
 data TypeAssume = TypeAssume Identifier Expr
     deriving (Eq, Show)
 
-data Statement =
-    StAssume (NE.NonEmpty TypeAssume)
+data Statement
+    = StAssume (NE.NonEmpty TypeAssume)
     | StLet Identifier Expr
     | StExpr Expr
     deriving (Eq, Show)
-
 
 symbols :: [Text] -> Parser Text
 symbols = asum . map symbol
@@ -84,14 +80,14 @@ starSym :: Parser ()
 starSym = syntax ["∗", "*", "Type"]
 
 lineEnd :: Parser ()
-lineEnd  = void eol <|> eof
+lineEnd = void eol <|> eof
 
 assumeParser :: Parser Statement
-assumeParser = StAssume <$> (assumeSym *>  parser)
+assumeParser = StAssume <$> (assumeSym *> parser)
   where
     parser =
         NE.singleton <$> try typeAssumeParser
-        <|> NE.some1 (parens typeAssumeParser)
+            <|> NE.some1 (parens typeAssumeParser)
 
 statementParser :: Parser Statement
 statementParser = sc *> (assumeParser <|> letParser <|> StExpr <$> expression) <* eof
@@ -99,23 +95,20 @@ statementParser = sc *> (assumeParser <|> letParser <|> StExpr <$> expression) <
 letParser :: Parser Statement
 letParser =
     StLet
-    <$> (sc *> symbol "let" *> identifierParser)
-    <*> (symbol "=" *> expression)
+        <$> (sc *> symbol "let" *> identifierParser)
+        <*> (symbol "=" *> expression)
 
 identifierParser :: Parser Identifier
 identifierParser =
     Identifier . T.pack <$> lexeme name
-        where name = (:) <$> (letterChar <|> char '_') <*> many alphaNumChar <?> "identifier"
-
+  where
+    name = (:) <$> (letterChar <|> char '_') <*> many alphaNumChar <?> "identifier"
 
 typeAssumeParser :: Parser TypeAssume
 typeAssumeParser = TypeAssume <$> (identifierParser <* ofTypeSym) <*> exp
 
-
-
 literalNat :: Parser Expr
 literalNat = LiteralNat <$> lexeme decimal
-
 
 lambdaParser :: Parser Expr
 lambdaParser = do
@@ -123,7 +116,7 @@ lambdaParser = do
     args <- NE.some1 identifierParser
     arrowSym
     Lambda args <$> exp
-   
+
 pi :: Parser Expr
 pi = do
     piSym
@@ -131,14 +124,13 @@ pi = do
     syntax ["."]
     expr <- exp
     pure $ Pi args expr
-    where
-        argsParser = NE.some1 (parens argParser) --fixme allow single arguments without parens
-        argParser = do
-            ident <- try identifierParser
-            try ofTypeSym
-            typ <- exp
-            pure (ident, typ)
-
+  where
+    argsParser = NE.some1 (parens argParser) -- fixme allow single arguments without parens
+    argParser = do
+        ident <- try identifierParser
+        try ofTypeSym
+        typ <- exp
+        pure (ident, typ)
 
 expression :: Parser Expr
 expression = sc *> exp
@@ -147,22 +139,21 @@ exp :: Parser Expr
 exp = makeExprParser term table
 
 term :: Parser Expr
-term = parens exp
-       <|> (starSym $> Star)
-       <|> literalNat
-       <|> pi
-       <|> lambdaParser
-       <|> Var <$> try identifierParser
+term =
+    parens exp
+        <|> (starSym $> Star)
+        <|> literalNat
+        <|> pi
+        <|> lambdaParser
+        <|> Var <$> try identifierParser
 
 table :: [[Operator Parser Expr]]
-table = [ [InfixL $ pure App]
-        , [InfixR $ Function <$ arrowSym]
-        , [InfixL $ Ann <$ ofTypeSym ]
-        ]
+table =
+    [ [InfixL $ pure App]
+    , [InfixR $ Function <$ arrowSym]
+    , [InfixL $ Ann <$ ofTypeSym]
+    ]
 
 parseStatement :: Text -> Either (ParseErrorBundle Text Void) Statement
 parseStatement statement =
     runParser statementParser "input" statement
-
-
-
